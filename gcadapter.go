@@ -194,14 +194,14 @@ func (adapter *GCAdapter) step() error {
 	}
 
 	for PORT, controller := range controllers {
-		if adapter.controllers[PORT].PluggedIn != adapter.offsets[PORT].PluggedIn {
-			adapter.offsets[PORT].PluggedIn = adapter.controllers[PORT].PluggedIn
-			adapter.offsets[PORT].StickX = adapter.controllers[PORT].StickX
-			adapter.offsets[PORT].StickY = adapter.controllers[PORT].StickY
-			adapter.offsets[PORT].CX = adapter.controllers[PORT].CX
-			adapter.offsets[PORT].CY = adapter.controllers[PORT].CY
-			adapter.offsets[PORT].LAnalog = adapter.controllers[PORT].LAnalog
-			adapter.offsets[PORT].RAnalog = adapter.controllers[PORT].RAnalog
+		if adapter.offsets[PORT].PluggedIn != controllers[PORT].PluggedIn {
+			adapter.offsets[PORT].PluggedIn = controllers[PORT].PluggedIn
+			adapter.offsets[PORT].StickX = controllers[PORT].StickX
+			adapter.offsets[PORT].StickY = controllers[PORT].StickY
+			adapter.offsets[PORT].CX = controllers[PORT].CX
+			adapter.offsets[PORT].CY = controllers[PORT].CY
+			adapter.offsets[PORT].LAnalog = controllers[PORT].LAnalog
+			adapter.offsets[PORT].RAnalog = controllers[PORT].RAnalog
 		}
 		adapter.mutex.Lock()
 		adapter.controllers[PORT] = controller
