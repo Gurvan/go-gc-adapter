@@ -307,7 +307,7 @@ func deserializeGCControllers(data []byte) map[uint8]*rawGCInput {
 		gcInput.StickX = data[9*PORT+4]
 		gcInput.StickY = data[9*PORT+5]
 		gcInput.CX = data[9*PORT+6]
-		gcInput.CX = data[9*PORT+7]
+		gcInput.CY = data[9*PORT+7]
 		gcInput.LAnalog = data[9*PORT+8]
 		gcInput.RAnalog = data[9*PORT+9]
 
