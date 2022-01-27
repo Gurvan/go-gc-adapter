@@ -5,82 +5,54 @@ import (
 	"log"
 	"sync"
 
-	"github.com/google/gousb"
+	// "github.com/google/gousb"
+	"github.com/karalabe/hid"
 )
 
 const (
-	gcAdapterVendorID  gousb.ID = 0x057E
-	gcAdapterProductID gousb.ID = 0x0337
-	startEndpoint      int      = 0x02
-	readEndpoint       int      = 0x81
+	vendorID  uint16 = 0x057E
+	productID uint16 = 0x0337
 )
 
 var startPayload = []byte{0x13}
 
 // GCAdapter represents a Gamecube controller usb adapter
 type GCAdapter struct {
-	ctx         *gousb.Context
-	dev         *gousb.Device
-	cfg         *gousb.Config
-	intf        *gousb.Interface
-	endpoint    *gousb.InEndpoint
 	controllers map[uint8]*rawGCInput
 	offsets     map[uint8]*Offsets
 	mutex       sync.RWMutex
+	device      *hid.Device
 }
 
 // NewGCAdapter connects to a Gamecube controller usb adapter and returns a pointer to it.
 // An adapter should be closed with adapter.Close() once it's not required anymore or when the program closes.
 // The best way of achieving that is calling defer adapter.Close() right after adapter, err := NewGCAdapter()
 func NewGCAdapter() (*GCAdapter, error) {
-	var adapter *GCAdapter = nil
-	ctx := gousb.NewContext()
-	dev, err := ctx.OpenDeviceWithVIDPID(gcAdapterVendorID, gcAdapterProductID)
-	if dev == nil {
-		err = errors.New("GC Adapter: no adapter found")
+	var adapter = &GCAdapter{}
+
+	if !hid.Supported() {
+		return adapter, errors.New("HID is not supported on this device")
 	}
+
+	devices := hid.Enumerate(vendorID, productID)
+	var deviceInfo hid.DeviceInfo
+	if len(devices) > 0 {
+		deviceInfo = devices[0]
+	} else {
+		return adapter, errors.New("GC Adapter: no adapter found")
+	}
+	device, err := deviceInfo.Open()
 	if err != nil {
-		// log.Fatalf("list: %s", err)
 		return adapter, err
 	}
 
-	dev.SetAutoDetach(true)
-
-	cfg, err := dev.Config(1)
+	_, err = device.Write(startPayload)
 	if err != nil {
-		// log.Fatalf("%s.Config(1): %v", dev, err)
 		return adapter, err
 	}
 
-	intf, err := cfg.Interface(0, 0)
-	if err != nil {
-		// log.Fatalf("%s.Interface(0, 0): %v", cfg, err)
-		return adapter, err
-	}
+	adapter.device = device
 
-	outep, err := intf.OutEndpoint(startEndpoint)
-	if err != nil {
-		// log.Fatalf("%s.OutEndpoint(%d): %v", outep, startEndpoint, err)
-		return adapter, err
-	}
-
-	_, err = outep.Write(startPayload)
-	if err != nil {
-		// log.Fatalf("Can't write payload %d: %v", out, err)
-		return adapter, err
-	}
-
-	inep, err := intf.InEndpoint(readEndpoint)
-	if err != nil {
-		// log.Fatalf("%s.InEndpoint(%d): %v", inep, readEndpoint, err)
-		return adapter, err
-	}
-
-	adapter = newGCAdapterFromEndpoint(inep)
-	adapter.ctx = ctx
-	adapter.dev = dev
-	adapter.cfg = cfg
-	adapter.intf = intf
 	adapter.mutex.Lock()
 	adapter.controllers = make(map[uint8]*rawGCInput)
 	adapter.offsets = make(map[uint8]*Offsets)
@@ -90,12 +62,6 @@ func NewGCAdapter() (*GCAdapter, error) {
 	}
 	adapter.mutex.Unlock()
 	return adapter, nil
-}
-
-func newGCAdapterFromEndpoint(endpoint *gousb.InEndpoint) *GCAdapter {
-	adapter := &GCAdapter{}
-	adapter.endpoint = endpoint
-	return adapter
 }
 
 // Poll polls the Gamecube usb adapter once
@@ -118,21 +84,7 @@ func (adapter *GCAdapter) StartPolling() {
 
 // Close properly closes the adapter once it's not required anymore
 func (adapter *GCAdapter) Close() error {
-	var err error
-	err = adapter.ctx.Close()
-	if err != nil {
-		return err
-	}
-	err = adapter.dev.Close()
-	if err != nil {
-		return err
-	}
-	err = adapter.cfg.Close()
-	if err != nil {
-		return err
-	}
-	adapter.intf.Close()
-	return nil
+	return adapter.device.Close()
 }
 
 // Buttons represents the Gamecube controller buttons
@@ -188,7 +140,7 @@ type Offsets struct {
 }
 
 func (adapter *GCAdapter) step() error {
-	controllers, err := readGCAdapter(adapter.endpoint)
+	controllers, err := readGCAdapter(adapter.device)
 	if err != nil {
 		return err
 	}
@@ -284,7 +236,7 @@ func processRawController(rawInput *rawGCInput, offsets *Offsets) *GCInputs {
 	return &gcinput
 }
 
-func deserializeGCControllers(data []byte) map[uint8]*rawGCInput {
+func DeserializeGCControllers(data []byte) map[uint8]*rawGCInput {
 	gcInputs := make(map[uint8]*rawGCInput)
 	for _, PORT := range []uint8{0, 1, 2, 3} {
 		gcInput := &rawGCInput{}
@@ -316,15 +268,15 @@ func deserializeGCControllers(data []byte) map[uint8]*rawGCInput {
 	return gcInputs
 }
 
-func readGCAdapter(adapterEndpoint *gousb.InEndpoint) (map[uint8]*rawGCInput, error) {
+func readGCAdapter(device *hid.Device) (map[uint8]*rawGCInput, error) {
 	rawGcInputs := make(map[uint8]*rawGCInput)
 
-	data := make([]byte, adapterEndpoint.Desc.MaxPacketSize)
-	_, err := adapterEndpoint.Read(data)
+	data := make([]byte, 37)
+	_, err := device.Read(data)
 	if err != nil {
 		// fmt.Printf("Couldn't read adapter. Error: %v\n", err)
 		return rawGcInputs, err
 	}
-	rawGcInputs = deserializeGCControllers(data)
+	rawGcInputs = DeserializeGCControllers(data)
 	return rawGcInputs, nil
 }
