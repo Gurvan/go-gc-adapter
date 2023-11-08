@@ -57,8 +57,8 @@ func NewGCAdapter() (*GCAdapter, error) {
 	adapter.controllers = make(map[uint8]*rawGCInput)
 	adapter.offsets = make(map[uint8]*Offsets)
 	for _, PORT := range []uint8{0, 1, 2, 3} {
-		adapter.controllers[PORT] = &rawGCInput{}
-		adapter.offsets[PORT] = &Offsets{}
+		adapter.controllers[PORT] = neutralRawInput()
+		adapter.offsets[PORT] = neutralRawInput()
 	}
 	adapter.mutex.Unlock()
 	return adapter, nil
@@ -114,6 +114,19 @@ type rawGCInput struct {
 	PluggedIn bool
 }
 
+func neutralRawInput() *rawGCInput {
+    return &rawGCInput{
+    	Button:    Buttons{},
+    	StickX:    128,
+    	StickY:    128,
+    	CX:        128,
+    	CY:        128,
+    	LAnalog:   255,
+    	RAnalog:   255,
+    	PluggedIn: false,
+    }
+}
+
 // GCInputs represent the state of the gamecube controller, with sticks values in [-1, 1], triggers values in [0, 1] and buttons as boolean
 // Sticks and triggers values are calibrated, and sticks values are clamped inside the unit circle, but deadzones are not enforced.
 type GCInputs struct {
@@ -129,15 +142,7 @@ type GCInputs struct {
 
 // Offsets are the sticks and trigger values read right after plugging the controller or resetting it with X+Y+Start.
 // They are used to calibrate the values returned in GCInputs.
-type Offsets struct {
-	StickX    uint8
-	StickY    uint8
-	CX        uint8
-	CY        uint8
-	LAnalog   uint8
-	RAnalog   uint8
-	PluggedIn bool
-}
+type Offsets = rawGCInput
 
 func (adapter *GCAdapter) step() error {
 	controllers, err := readGCAdapter(adapter.device)
