@@ -1,91 +1,242 @@
 package gcadapter
 
+/*
+#cgo CFLAGS: -I${SRCDIR}/libusb/libusb
+#cgo windows LDFLAGS: ${SRCDIR}/libusb-1.0.a -lsetupapi -lole32 -ladvapi32
+#include <libusb.h>
+#include <stdlib.h>
+
+static int control_transfer(libusb_device_handle *dev_handle,
+    uint8_t bmRequestType, uint8_t bRequest, uint16_t wValue, uint16_t wIndex,
+    unsigned char *data, uint16_t wLength, unsigned int timeout)
+{
+    return libusb_control_transfer(dev_handle, bmRequestType, bRequest,
+        wValue, wIndex, data, wLength, timeout);
+}
+
+static int interrupt_transfer(libusb_device_handle *dev_handle,
+    unsigned char endpoint, unsigned char *data, int length,
+    int *actual_length, unsigned int timeout)
+{
+    return libusb_interrupt_transfer(dev_handle, endpoint, data, length,
+        actual_length, timeout);
+}
+*/
+import "C"
 import (
 	"errors"
-	"log"
+	"fmt"
 	"sync"
-
-	// "github.com/google/gousb"
-	"github.com/karalabe/hid"
 )
 
 const (
-	vendorID  uint16 = 0x057E
-	productID uint16 = 0x0337
+	vendorID  = 0x057E
+	productID = 0x0337
 )
 
 var startPayload = []byte{0x13}
 
-// GCAdapter represents a Gamecube controller usb adapter
+// GCAdapter represents a Gamecube controller USB adapter
 type GCAdapter struct {
 	controllers map[uint8]*rawGCInput
 	offsets     map[uint8]*Offsets
 	mutex       sync.RWMutex
-	device      *hid.Device
+	context     *C.libusb_context
+	device      *C.libusb_device_handle
+	buffer      []byte
+	endpoint    uint8
 }
 
-// NewGCAdapter connects to a Gamecube controller usb adapter and returns a pointer to it.
-// An adapter should be closed with adapter.Close() once it's not required anymore or when the program closes.
-// The best way of achieving that is calling defer adapter.Close() right after adapter, err := NewGCAdapter()
+// NewGCAdapter connects to a Gamecube controller USB adapter and returns a pointer to it.
 func NewGCAdapter() (*GCAdapter, error) {
-	var adapter = &GCAdapter{}
-
-	if !hid.Supported() {
-		return adapter, errors.New("HID is not supported on this device")
+	adapter := &GCAdapter{
+		controllers: make(map[uint8]*rawGCInput),
+		offsets:     make(map[uint8]*Offsets),
+		buffer:      make([]byte, 37),
+		endpoint:    0x81, // IN endpoint
 	}
 
-	devices := hid.Enumerate(vendorID, productID)
-	var deviceInfo hid.DeviceInfo
-	if len(devices) > 0 {
-		deviceInfo = devices[0]
-	} else {
-		return adapter, errors.New("GC Adapter: no adapter found")
-	}
-	device, err := deviceInfo.Open()
-	if err != nil {
-		return adapter, err
+	if err := C.libusb_init(&adapter.context); err != 0 {
+		return nil, fmt.Errorf("failed to initialize libusb: %d", err)
 	}
 
-	_, err = device.Write(startPayload)
-	if err != nil {
-		return adapter, err
+	adapter.device = C.libusb_open_device_with_vid_pid(adapter.context, C.uint16_t(vendorID), C.uint16_t(productID))
+	if adapter.device == nil {
+		C.libusb_exit(adapter.context)
+		return nil, errors.New("GC Adapter: no adapter found")
 	}
 
-	adapter.device = device
+	if err := C.libusb_claim_interface(adapter.device, 0); err != 0 {
+		C.libusb_close(adapter.device)
+		C.libusb_exit(adapter.context)
+		return nil, fmt.Errorf("failed to claim interface: %d", err)
+	}
 
-	adapter.mutex.Lock()
-	adapter.controllers = make(map[uint8]*rawGCInput)
-	adapter.offsets = make(map[uint8]*Offsets)
+	// Send start payload using control transfer
+	result := C.control_transfer(adapter.device, 0x21, 0x09, 0x0200, 0, (*C.uchar)(&startPayload[0]), C.uint16_t(len(startPayload)), 1000)
+	if result < 0 {
+		C.libusb_release_interface(adapter.device, 0)
+		C.libusb_close(adapter.device)
+		C.libusb_exit(adapter.context)
+		return nil, fmt.Errorf("failed to send start payload: %d", result)
+	}
+
 	for _, PORT := range []uint8{0, 1, 2, 3} {
 		adapter.controllers[PORT] = neutralRawInput()
 		adapter.offsets[PORT] = neutralRawInput()
 	}
-	adapter.mutex.Unlock()
+
 	return adapter, nil
 }
 
-// Poll polls the Gamecube usb adapter once
+// Poll polls the Gamecube USB adapter once
 func (adapter *GCAdapter) Poll() error {
 	return adapter.step()
 }
 
-// StartPolling starts a Gamecube adapter polling loop, where the adapter is polled at its defined polling rate
-// (which is 125Hz by default on the official adapter).
-// The function is meant to be wrapped in a goroutine.
+// StartPolling starts a Gamecube adapter polling loop
 func (adapter *GCAdapter) StartPolling() {
-	var err error
 	for {
-		err = adapter.step()
-		if err != nil {
-			log.Printf("%v", err)
+		if err := adapter.step(); err != nil {
+			fmt.Printf("Polling error: %v\n", err)
 		}
 	}
 }
 
-// Close properly closes the adapter once it's not required anymore
-func (adapter *GCAdapter) Close() error {
-	return adapter.device.Close()
+// Close properly closes the adapter
+func (adapter *GCAdapter) Close() {
+	if adapter.device != nil {
+		C.libusb_release_interface(adapter.device, 0)
+		C.libusb_close(adapter.device)
+	}
+	if adapter.context != nil {
+		C.libusb_exit(adapter.context)
+	}
 }
+
+func (adapter *GCAdapter) step() error {
+	var transferred C.int
+	result := C.interrupt_transfer(adapter.device, C.uchar(adapter.endpoint), (*C.uchar)(&adapter.buffer[0]), C.int(len(adapter.buffer)), &transferred, 1000)
+	if result != 0 {
+		return fmt.Errorf("failed to read from device: %d", result)
+	}
+
+	if int(transferred) != len(adapter.buffer) {
+		return fmt.Errorf("incomplete read: got %d bytes, expected %d", int(transferred), len(adapter.buffer))
+	}
+
+	controllers := DeserializeGCControllers(adapter.buffer)
+
+	adapter.mutex.Lock()
+	defer adapter.mutex.Unlock()
+
+	for PORT, controller := range controllers {
+		if adapter.offsets[PORT].PluggedIn != controller.PluggedIn {
+			adapter.offsets[PORT] = controller
+		}
+		adapter.controllers[PORT] = controller
+	}
+
+	return nil
+}
+
+// The rest of the code (Controller, Controllers, AllControllers, etc.) remains the same...
+
+// Helper function to convert libusb errors to Go errors
+func fromRawErrno(errno C.int) error {
+	if errno < 0 {
+		return fmt.Errorf("libusb error: %d", errno)
+	}
+	return nil
+}
+
+// // Poll polls the Gamecube USB adapter once
+// func (adapter *GCAdapter) Poll() error {
+// 	return adapter.step()
+// }
+
+// // StartPolling starts a Gamecube adapter polling loop
+// func (adapter *GCAdapter) StartPolling() {
+// 	for {
+// 		if err := adapter.step(); err != nil {
+// 			fmt.Printf("Polling error: %v\n", err)
+// 		}
+// 	}
+// }
+
+// // Close properly closes the adapter
+// func (adapter *GCAdapter) Close() {
+// 	if adapter.transfer != nil {
+// 		C.free_transfer(adapter.transfer)
+// 	}
+// 	if adapter.device != nil {
+// 		C.libusb_release_interface(adapter.device, 0)
+// 		C.libusb_close(adapter.device)
+// 	}
+// 	if adapter.context != nil {
+// 		C.libusb_exit(adapter.context)
+// 	}
+// }
+
+// func (adapter *GCAdapter) step() error {
+// 	C.libusb_fill_interrupt_transfer(adapter.transfer, adapter.device, 0x81, (*C.uchar)(&adapter.buffer[0]), C.int(len(adapter.buffer)), nil, nil, 1000)
+
+// 	if err := C.submit_transfer(adapter.transfer); err != 0 {
+// 		return fmt.Errorf("failed to submit transfer: %d", err)
+// 	}
+
+// 	if err := C.libusb_handle_events(adapter.context); err != 0 {
+// 		return fmt.Errorf("failed to handle events: %d", err)
+// 	}
+
+// 	controllers := DeserializeGCControllers(adapter.buffer)
+
+// 	adapter.mutex.Lock()
+// 	defer adapter.mutex.Unlock()
+
+// 	for PORT, controller := range controllers {
+// 		if adapter.offsets[PORT].PluggedIn != controller.PluggedIn {
+// 			adapter.offsets[PORT] = controller
+// 		}
+// 		adapter.controllers[PORT] = controller
+// 	}
+
+// 	return nil
+// }
+
+// Controller returns the current state of the controller on port PORT.
+func (adapter *GCAdapter) Controller(PORT uint8) *GCInputs {
+	adapter.mutex.RLock()
+	defer adapter.mutex.RUnlock()
+	return processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
+}
+
+// Controllers returns the current state of the plugged in controllers.
+func (adapter *GCAdapter) Controllers() map[uint8]*GCInputs {
+	adapter.mutex.RLock()
+	defer adapter.mutex.RUnlock()
+	gcInputs := make(map[uint8]*GCInputs)
+	for _, PORT := range []uint8{0, 1, 2, 3} {
+		if adapter.controllers[PORT].PluggedIn {
+			gcInputs[PORT] = processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
+		}
+	}
+	return gcInputs
+}
+
+// AllControllers returns the current state of the 4 controllers (even unplugged ones)
+func (adapter *GCAdapter) AllControllers() map[uint8]*GCInputs {
+	adapter.mutex.RLock()
+	defer adapter.mutex.RUnlock()
+	gcInputs := make(map[uint8]*GCInputs)
+	for _, PORT := range []uint8{0, 1, 2, 3} {
+		gcInputs[PORT] = processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
+	}
+	return gcInputs
+}
+
+// The rest of the code (Buttons, rawGCInput, GCInputs, Offsets, processRawController, DeserializeGCControllers)
+// remains the same as in the original implementation.
 
 // Buttons represents the Gamecube controller buttons
 type Buttons struct {
@@ -115,20 +266,19 @@ type rawGCInput struct {
 }
 
 func neutralRawInput() *rawGCInput {
-    return &rawGCInput{
-    	Button:    Buttons{},
-    	StickX:    128,
-    	StickY:    128,
-    	CX:        128,
-    	CY:        128,
-    	LAnalog:   255,
-    	RAnalog:   255,
-    	PluggedIn: false,
-    }
+	return &rawGCInput{
+		Button:    Buttons{},
+		StickX:    128,
+		StickY:    128,
+		CX:        128,
+		CY:        128,
+		LAnalog:   255,
+		RAnalog:   255,
+		PluggedIn: false,
+	}
 }
 
 // GCInputs represent the state of the gamecube controller, with sticks values in [-1, 1], triggers values in [0, 1] and buttons as boolean
-// Sticks and triggers values are calibrated, and sticks values are clamped inside the unit circle, but deadzones are not enforced.
 type GCInputs struct {
 	Button    Buttons
 	StickX    float32
@@ -141,63 +291,7 @@ type GCInputs struct {
 }
 
 // Offsets are the sticks and trigger values read right after plugging the controller or resetting it with X+Y+Start.
-// They are used to calibrate the values returned in GCInputs.
 type Offsets = rawGCInput
-
-func (adapter *GCAdapter) step() error {
-	controllers, err := readGCAdapter(adapter.device)
-	if err != nil {
-		return err
-	}
-
-	for PORT, controller := range controllers {
-		if adapter.offsets[PORT].PluggedIn != controllers[PORT].PluggedIn {
-			adapter.offsets[PORT].PluggedIn = controllers[PORT].PluggedIn
-			adapter.offsets[PORT].StickX = controllers[PORT].StickX
-			adapter.offsets[PORT].StickY = controllers[PORT].StickY
-			adapter.offsets[PORT].CX = controllers[PORT].CX
-			adapter.offsets[PORT].CY = controllers[PORT].CY
-			adapter.offsets[PORT].LAnalog = controllers[PORT].LAnalog
-			adapter.offsets[PORT].RAnalog = controllers[PORT].RAnalog
-		}
-		adapter.mutex.Lock()
-		adapter.controllers[PORT] = controller
-		adapter.mutex.Unlock()
-	}
-
-	return nil
-}
-
-// Controller return the current state of the controller on port PORT.
-func (adapter *GCAdapter) Controller(PORT uint8) *GCInputs {
-	adapter.mutex.RLock()
-	defer adapter.mutex.RUnlock()
-	return processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
-}
-
-// Controllers return the current state of the plugged in controllers.
-func (adapter *GCAdapter) Controllers() map[uint8]*GCInputs {
-	adapter.mutex.RLock()
-	defer adapter.mutex.RUnlock()
-	gcInputs := make(map[uint8]*GCInputs)
-	for _, PORT := range []uint8{0, 1, 2, 3} {
-		if adapter.controllers[PORT].PluggedIn {
-			gcInputs[PORT] = processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
-		}
-	}
-	return gcInputs
-}
-
-// AllControllers return the current state of the 4 controllers (even unplugged ones)
-func (adapter *GCAdapter) AllControllers() map[uint8]*GCInputs {
-	adapter.mutex.RLock()
-	defer adapter.mutex.RUnlock()
-	gcInputs := make(map[uint8]*GCInputs)
-	for _, PORT := range []uint8{0, 1, 2, 3} {
-		gcInputs[PORT] = processRawController(adapter.controllers[PORT], adapter.offsets[PORT])
-	}
-	return gcInputs
-}
 
 func processRawController(rawInput *rawGCInput, offsets *Offsets) *GCInputs {
 	gcinput := GCInputs{}
@@ -231,13 +325,8 @@ func processRawController(rawInput *rawGCInput, offsets *Offsets) *GCInputs {
 	}
 	gcinput.RAnalog = float32(r) / 140.
 
-	// Deadzone
-	// if math.Abs(float64(gcinput.StickX)) < 0.28 {
-	// 	gcinput.StickX = 0
-	// }
-	// if math.Abs(float64(gcinput.StickY)) < 0.28 {
-	// 	gcinput.StickY = 0
-	// }
+	gcinput.PluggedIn = rawInput.PluggedIn
+
 	return &gcinput
 }
 
@@ -271,17 +360,4 @@ func DeserializeGCControllers(data []byte) map[uint8]*rawGCInput {
 		gcInputs[PORT] = gcInput
 	}
 	return gcInputs
-}
-
-func readGCAdapter(device *hid.Device) (map[uint8]*rawGCInput, error) {
-	rawGcInputs := make(map[uint8]*rawGCInput)
-
-	data := make([]byte, 37)
-	_, err := device.Read(data)
-	if err != nil {
-		// fmt.Printf("Couldn't read adapter. Error: %v\n", err)
-		return rawGcInputs, err
-	}
-	rawGcInputs = DeserializeGCControllers(data)
-	return rawGcInputs, nil
 }
