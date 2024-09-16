@@ -45,6 +45,7 @@ type GCAdapter struct {
 	device      *C.libusb_device_handle
 	buffer      []byte
 	endpoint    uint8
+	stopChan    chan bool
 }
 
 // NewGCAdapter connects to a Gamecube controller USB adapter and returns a pointer to it.
@@ -54,6 +55,7 @@ func NewGCAdapter() (*GCAdapter, error) {
 		offsets:     make(map[uint8]*Offsets),
 		buffer:      make([]byte, 37),
 		endpoint:    0x81, // IN endpoint
+		stopChan:    make(chan bool),
 	}
 
 	if err := C.libusb_init(&adapter.context); err != 0 {
@@ -96,22 +98,34 @@ func (adapter *GCAdapter) Poll() error {
 
 // StartPolling starts a Gamecube adapter polling loop
 func (adapter *GCAdapter) StartPolling() {
-	for {
-		if err := adapter.step(); err != nil {
-			fmt.Printf("Polling error: %v\n", err)
+	go func() {
+		for {
+			select {
+			case <-adapter.stopChan:
+				return
+			default:
+				if err := adapter.step(); err != nil {
+					fmt.Printf("Polling error: %v\n", err)
+				}
+			}
 		}
-	}
+	}()
 }
 
 // Close properly closes the adapter
-func (adapter *GCAdapter) Close() {
+func (adapter *GCAdapter) Close() error {
+	adapter.stopChan <- true
 	if adapter.device != nil {
 		C.libusb_release_interface(adapter.device, 0)
 		C.libusb_close(adapter.device)
+		adapter.device = nil
 	}
 	if adapter.context != nil {
 		C.libusb_exit(adapter.context)
+		adapter.context = nil
 	}
+
+	return nil
 }
 
 func (adapter *GCAdapter) step() error {
