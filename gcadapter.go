@@ -65,7 +65,16 @@ func NewGCAdapter() (*GCAdapter, error) {
 	adapter.device = C.libusb_open_device_with_vid_pid(adapter.context, C.uint16_t(vendorID), C.uint16_t(productID))
 	if adapter.device == nil {
 		C.libusb_exit(adapter.context)
-		return nil, errors.New("GC Adapter: no adapter found")
+		return nil, errors.New("GC Adapter: no adapter found or unable to open device")
+	}
+
+	// Detach kernel driver if necessary
+	if C.libusb_kernel_driver_active(adapter.device, 0) == 1 {
+		if err := C.libusb_detach_kernel_driver(adapter.device, 0); err != 0 {
+			C.libusb_close(adapter.device)
+			C.libusb_exit(adapter.context)
+			return nil, fmt.Errorf("failed to detach kernel driver: %d", err)
+		}
 	}
 
 	if err := C.libusb_claim_interface(adapter.device, 0); err != 0 {
@@ -74,13 +83,17 @@ func NewGCAdapter() (*GCAdapter, error) {
 		return nil, fmt.Errorf("failed to claim interface: %d", err)
 	}
 
-	// Send start payload using control transfer
-	result := C.control_transfer(adapter.device, 0x21, 0x09, 0x0200, 0, (*C.uchar)(&startPayload[0]), C.uint16_t(len(startPayload)), 1000)
-	if result < 0 {
+	var transferred C.int
+	result := C.interrupt_transfer(adapter.device, C.uchar(0x02), (*C.uchar)(&startPayload[0]), C.int(len(startPayload)), &transferred, 0)
+	if result != 0 {
 		C.libusb_release_interface(adapter.device, 0)
 		C.libusb_close(adapter.device)
 		C.libusb_exit(adapter.context)
 		return nil, fmt.Errorf("failed to send start payload: %d", result)
+	}
+
+	if int(transferred) != 1 {
+		return nil, fmt.Errorf("incomplete read: got %d bytes, expected %d", int(transferred), len(adapter.buffer))
 	}
 
 	for _, PORT := range []uint8{0, 1, 2, 3} {

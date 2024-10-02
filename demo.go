@@ -14,6 +14,7 @@ func main() {
 	adapter, err := gca.NewGCAdapter()
 	if err != nil {
 		fmt.Printf("%v\n", err)
+		return
 	}
 	defer adapter.Close()
 	go adapter.StartPolling()
