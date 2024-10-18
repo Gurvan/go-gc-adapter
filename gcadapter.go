@@ -28,7 +28,7 @@ type GCAdapter struct {
 // An adapter should be closed with adapter.Close() once it's not required anymore or when the program closes.
 // The best way of achieving that is calling defer adapter.Close() right after adapter, err := NewGCAdapter()
 func NewGCAdapter() (*GCAdapter, error) {
-	var adapter = &GCAdapter{}
+	adapter := &GCAdapter{}
 
 	if !hid.Supported() {
 		return adapter, errors.New("HID is not supported on this device")
@@ -115,16 +115,16 @@ type rawGCInput struct {
 }
 
 func neutralRawInput() *rawGCInput {
-    return &rawGCInput{
-    	Button:    Buttons{},
-    	StickX:    128,
-    	StickY:    128,
-    	CX:        128,
-    	CY:        128,
-    	LAnalog:   255,
-    	RAnalog:   255,
-    	PluggedIn: false,
-    }
+	return &rawGCInput{
+		Button:    Buttons{},
+		StickX:    128,
+		StickY:    128,
+		CX:        128,
+		CY:        128,
+		LAnalog:   255,
+		RAnalog:   255,
+		PluggedIn: false,
+	}
 }
 
 // GCInputs represent the state of the gamecube controller, with sticks values in [-1, 1], triggers values in [0, 1] and buttons as boolean
@@ -201,6 +201,7 @@ func (adapter *GCAdapter) AllControllers() map[uint8]*GCInputs {
 
 func processRawController(rawInput *rawGCInput, offsets *Offsets) *GCInputs {
 	gcinput := GCInputs{}
+	gcinput.PluggedIn = rawInput.PluggedIn
 	gcinput.Button = rawInput.Button
 
 	x, y := rawInput.StickX, rawInput.StickY
