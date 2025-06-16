@@ -78,6 +78,7 @@ func (adapter *GCAdapter) StartPolling() {
 		err = adapter.step()
 		if err != nil {
 			log.Printf("%v", err)
+			panic(err)
 		}
 	}
 }
@@ -101,6 +102,36 @@ type Buttons struct {
 	R     bool
 	Z     bool
 	START bool
+}
+
+func (b Buttons) IsPressed(name string) bool {
+	switch name {
+	case "UP":
+		return b.UP
+	case "DOWN":
+		return b.DOWN
+	case "RIGHT":
+		return b.RIGHT
+	case "LEFT":
+		return b.LEFT
+	case "Y":
+		return b.Y
+	case "X":
+		return b.X
+	case "B":
+		return b.B
+	case "A":
+		return b.A
+	case "L":
+		return b.L
+	case "R":
+		return b.R
+	case "Z":
+		return b.Z
+	case "START":
+		return b.START
+	}
+	return false
 }
 
 type rawGCInput struct {
